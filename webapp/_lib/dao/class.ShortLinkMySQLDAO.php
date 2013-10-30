@@ -151,7 +151,12 @@ class ShortLinkMySQLDAO extends PDODAO {
         if ($this->profiler_enabled) { Profiler::setDAOMethod(__METHOD__); }
         $ps = $this->execute($q, $vars);
         $result = $this->getDataRowsAsArrays($ps);
-        return $result[0]["highest_click_count"];
+        if (isset($result[0]["highest_click_count"])) {
+            return $result[0]["highest_click_count"];
+        }
+        else {
+            return;
+        }
     }
 
     public function getHighestClickCountByLinkID($link_id) {
