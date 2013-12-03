@@ -241,12 +241,15 @@ class FacebookCrawler {
             $is_protected = ($network=='facebook')?1:0;
             //Get likes count
             $likes_count = 0;
+            //Normalize likes to be one array
             if (isset($p->likes)) {
-                if (is_int($p->likes)) {
-                    $likes_count = $p->likes;
-                } elseif (isset($p->likes->count) && is_int($p->likes->count) )  {
-                    $likes_count = $p->likes->count;
-                }
+                $p->likes = $this->normalizeLikes($p->likes);
+                $likes_count = $p->likes->count;
+            }
+
+            // Normalize comments to be one array
+            if (isset($p->comments)) {
+                $p->comments = $this->normalizeComments($p->comments);
             }
 
             $post_in_storage = $post_dao->getPost($post_id, $network);
@@ -268,11 +271,11 @@ class FacebookCrawler {
                     if ($post_in_storage->reply_count_cache >= $p->comments->count) {
                         $must_process_comments = false;
                         $this->logger->logInfo("Already have ".$p->comments->count." comment(s) for post ".$post_id.
-                        "; skipping comment processing", __METHOD__.','.__LINE__);
+                          "; skipping comment processing", __METHOD__.','.__LINE__);
                     } else {
                         $comments_difference = $p->comments->count - $post_in_storage->reply_count_cache;
                         $this->logger->logInfo($comments_difference." new comment(s) of ".$p->comments->count.
-                        " total to process for post ".$post_id, __METHOD__.','.__LINE__);
+                          " total to process for post ".$post_id, __METHOD__.','.__LINE__);
                     }
                 }
             } else {
@@ -309,13 +312,13 @@ class FacebookCrawler {
                     if (isset($p->source) || isset($p->link)) { // there's a link to store
                         $link_url = (isset($p->source))?$p->source:$p->link;
                         $link = new Link(array(
-                        "url"=>$link_url,
-                        "expanded_url"=>'',
-                        "image_src"=>(isset($p->picture))?$p->picture:'',
-                        "caption"=>(isset($p->caption))?$p->caption:'',
-                        "description"=>(isset($p->description))?$p->description:'',
-                        "title"=>(isset($p->name))?$p->name:'',
-                        "post_key"=>$new_post_key
+                          "url"=>$link_url,
+                          "expanded_url"=>'',
+                          "image_src"=>(isset($p->picture))?$p->picture:'',
+                          "caption"=>(isset($p->caption))?$p->caption:'',
+                          "description"=>(isset($p->description))?$p->description:'',
+                          "title"=>(isset($p->name))?$p->name:'',
+                          "post_key"=>$new_post_key
                         ));
                         array_push($thinkup_links, $link);
                     }
@@ -343,18 +346,25 @@ class FacebookCrawler {
                             if (is_array($post_comments) && sizeof($post_comments) > 0) {
                                 foreach ($post_comments as $c) {
                                     if (isset($c->from)) {
+                                        // Sometimes the id is parent_poster_postId
+                                        // sometimes it's just parent_postId
                                         $comment_id = explode("_", $c->id);
-                                        $comment_id = $comment_id[sizeof($comment_id)-1];
+                                        if (count($comment_id) == 3) {
+                                            $comment_id = $comment_id[2];
+                                        } else {
+                                            $comment_id = $comment_id[1];
+                                        }
                                         //only add to queue if not already in storage
                                         $comment_in_storage = $post_dao->getPost($comment_id, $network);
                                         if (!isset($comment_in_storage)) {
                                             $comment_to_process = array("post_id"=>$comment_id,
-                                            "author_username"=>$c->from->name, "author_fullname"=>$c->from->name,
-                                            "author_avatar"=>'https://graph.facebook.com/'.$c->from->id.'/picture',
-                                            "author_user_id"=>$c->from->id, "post_text"=>$c->message,
-                                            "pub_date"=>$c->created_time, "in_reply_to_user_id"=>$profile->user_id,
-                                            "in_reply_to_post_id"=>$post_id, "source"=>'', 'network'=>$network,
-                                            'is_protected'=>$is_protected, 'location'=>'');
+                                              "author_username"=>$c->from->name,
+                                              "author_fullname"=>$c->from->name,
+                                              "author_avatar"=>'https://graph.facebook.com/'.$c->from->id.'/picture',
+                                              "author_user_id"=>$c->from->id,"post_text"=>$c->message,
+                                              "pub_date"=>$c->created_time, "in_reply_to_user_id"=>$profile->user_id,
+                                              "in_reply_to_post_id"=>$post_id, "source"=>'', 'network'=>$network,
+                                              'is_protected'=>$is_protected, 'location'=>'');
                                             array_push($thinkup_posts, $comment_to_process);
                                             $comments_captured = $comments_captured + 1;
                                         }
@@ -385,8 +395,7 @@ class FacebookCrawler {
                                 $offset_str = "";
                             }
                             $api_call = 'https://graph.facebook.com/'.$p->from->id.'_'.$post_id.
-                            '/comments?access_token='. $this->access_token.$offset_str;
-                            //$this->logger->logInfo("API call ".$api_call, __METHOD__.','.__LINE__);
+                              '/comments?access_token='. $this->access_token.$offset_str;
                             do {
                                 $comments_stream = FacebookGraphAPIAccessor::rawApiRequest($api_call);
                                 if (isset($comments_stream) && isset($comments_stream->data)
@@ -676,5 +685,60 @@ class FacebookCrawler {
         } elseif (isset($stream->error->type) && ($stream->error->type == 'OAuthException')) {
             throw new APIOAuthException($stream->error->message);
         }
+    }
+
+    /**
+     * Take a list of comments from a page or a post, run through pagination
+     * and add a count member to the object.
+     * @param object $comments Comments Object structure from Facebook API
+     * @return object
+     */
+    private function normalizeComments($comments) {
+        $output = (object)array('count' => 0, 'data' => array());
+        while ($comments !== null) {
+            foreach ($comments->data as $comment) {
+                $output->data[] = $comment;
+                $output->count++;
+            }
+            if (!empty($comments->paging->next)) {
+                $next_url = $comments->paging->next . '&access_token=' . $this->access_token;
+                $comments = FacebookGraphAPIAccessor::rawApiRequest($next_url);
+            } else {
+                $comments = null;
+            }
+        }
+        return $output;
+    }
+
+    /**
+     * Take a list of likes from a page or a post, run through pagination and add a count member to the object.
+     * @param  object $likes Likes Object structure from Facebook API
+     * @return object
+     */
+    private function normalizeLikes($likes) {
+        $output = (object) array('count' => 0, 'data' => array());
+        // Just in case we get an object with the legacy layout
+        if (!isset($likes->data)) {
+            if (is_int($likes)) {
+                $output->count = $likes;
+            } elseif (is_object($likes) && isset($likes->count) && is_int($likes->count)) {
+                $output->count = $likes->count;
+            }
+            return $output;
+        }
+
+        while ($likes !== null) {
+            foreach ($likes->data as $like) {
+                $output->data[] = $like;
+                $output->count++;
+            }
+            if (!empty($likes->paging->next)) {
+                $next_url = $likes->paging->next . '&access_token=' . $this->access_token;
+                $likes = FacebookGraphAPIAccessor::rawApiRequest($next_url);
+            } else {
+                $likes = null;
+            }
+        }
+        return $output;
     }
 }
